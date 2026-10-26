@@ -4,8 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: |
-      pip install --no-cache-dir --force-reinstall -r requirements.txt &&
-      pip install --no-cache-dir --force-reinstall yt-dlp &&
+      pip install --no-cache-dir -r requirements.txt &&
       (node --version || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)) || true
     startCommand: bash start.sh
     healthCheckPath: /health
