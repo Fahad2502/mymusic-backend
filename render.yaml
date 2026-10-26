@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: mymusic-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install --no-cache-dir --force-reinstall -r requirements.txt && (node --version || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs))
+    startCommand: bash start.sh
+    healthCheckPath: /health
+# cookies.txt is committed in the repo and used directly by the app.
+# NOTE: on the Render dashboard you must set the service Start Command to:
+#   bash start.sh
+# (the build command stays: pip install -r requirements.txt)

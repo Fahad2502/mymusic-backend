@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+yt-dlp
+yt-dlp-ejs
+httpx
