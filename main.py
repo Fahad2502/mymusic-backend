@@ -67,59 +67,48 @@ def _get_strategies() -> list[dict]:
     pot_active = _is_pot_server_up()
 
     strategies = [
-        # Strategy 0: TV client — most resilient on datacenter IPs, no bot verification
-        {
-            "name": "tv",
-            "args": {
-                "youtube": {"player_client": ["tv"]}
-            }
-        },
-        # Strategy 1: Android client
+        # Strategy 0: Android client — most reliable on modern YouTube APIs without web bot check
         {
             "name": "android",
             "args": {
                 "youtube": {"player_client": ["android"]}
             }
         },
-        # Strategy 2: iOS client
+        # Strategy 1: iOS client
         {
             "name": "ios",
             "args": {
                 "youtube": {"player_client": ["ios"]}
             }
         },
-        # Strategy 3: Mobile Web client
+        # Strategy 2: Mobile Web client
         {
             "name": "mweb",
             "args": {
                 "youtube": {"player_client": ["mweb"]}
             }
         },
-    ]
-
-    # If the PO-token server is active, add web_creator with PO-token provider
-    if pot_active:
-        strategies.insert(1, {
-            "name": "pot_web_creator",
+        # Strategy 3: Web with POT server (if available)
+        {
+            "name": "pot_web",
             "args": {
                 "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
-                "youtube": {"player_client": ["web_creator", "web"]}
-            }
-        })
-    else:
-        strategies.append({
-            "name": "web_fallback",
-            "args": {
                 "youtube": {"player_client": ["web"]}
-            }
-        })
+            } if pot_active else {"youtube": {"player_client": ["web"]}}
+        },
+        # Strategy 4: Default fallback
+        {
+            "name": "default",
+            "args": {}
+        }
+    ]
 
     return strategies
 
 
 def _ydl_opts(strategy: dict) -> dict:
     opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "format": "bestaudio/best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -350,6 +339,30 @@ def debug():
         "audio_cache_entries": len(_AUDIO_CACHE),
         "stream_cache_entries": len(CACHE),
     }
+
+
+@app.get("/test_strategies")
+def test_strategies(v: str = "fHI8X4OXluQ"):
+    url = f"https://www.youtube.com/watch?v={v}"
+    out = []
+    for strat in _get_strategies():
+        try:
+            opts = _ydl_opts(strat)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            audio = _pick_audio_url(info)
+            out.append({
+                "strat": strat["name"],
+                "success": bool(audio),
+                "audio_url_preview": audio[:50] + "..." if audio else None,
+                "title": info.get("title")
+            })
+            if audio:
+                break
+        except Exception as e:
+            out.append({"strat": strat["name"], "success": False, "error": str(e)})
+    return {"video_id": v, "results": out}
+
 
 
 # ── Fast metadata search ──────────────────────────────────────────────────
