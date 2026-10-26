@@ -15,10 +15,10 @@ if [ ! -x "$BIN" ]; then
   done
 fi
 
-# Run the PO-token server in the background on localhost:4416.
+# Run the PO-token server in the background on localhost:4416 if binary is available
 if [ -x "$BIN" ]; then
   ( "$BIN" server --host 127.0.0.1 --port 4416 > /tmp/bgutil-pot.log 2>&1 ) &
-  for i in $(seq 1 40); do
+  for i in $(seq 1 30); do
     if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1; then
       echo "bgutil-pot server up on 127.0.0.1:4416"
       break
@@ -26,8 +26,8 @@ if [ -x "$BIN" ]; then
     sleep 1
   done
 else
-  echo "WARNING: bgutil-pot not available; PO token provider disabled"
+  echo "WARNING: bgutil-pot not executable; continuing without local POT provider"
 fi
 
 # Main process: the FastAPI app.
-exec uvicorn main:app --host 0.0.0.0 --port "$PORT"
+exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}"
