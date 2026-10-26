@@ -1,5 +1,5 @@
 fastapi
 uvicorn[standard]
-yt-dlp>=2025.1.1
+https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
 bgutil-ytdlp-pot-provider
 httpx

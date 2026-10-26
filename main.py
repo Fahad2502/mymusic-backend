@@ -67,41 +67,35 @@ def _get_strategies() -> list[dict]:
     pot_active = _is_pot_server_up()
 
     strategies = [
-        # Strategy 0: Android client — most reliable on modern YouTube APIs without web bot check
+        # Strategy 0: Android client (most reliable on YouTube without bot-check)
         {
             "name": "android",
             "args": {
                 "youtube": {"player_client": ["android"]}
             }
         },
-        # Strategy 1: iOS client
+        # Strategy 1: Mobile Web / iOS
         {
-            "name": "ios",
+            "name": "mweb_ios",
             "args": {
-                "youtube": {"player_client": ["ios"]}
+                "youtube": {"player_client": ["mweb", "ios"]}
             }
         },
-        # Strategy 2: Mobile Web client
-        {
-            "name": "mweb",
-            "args": {
-                "youtube": {"player_client": ["mweb"]}
-            }
-        },
-        # Strategy 3: Web with POT server (if available)
-        {
+    ]
+
+    if pot_active:
+        strategies.append({
             "name": "pot_web",
             "args": {
                 "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
                 "youtube": {"player_client": ["web"]}
-            } if pot_active else {"youtube": {"player_client": ["web"]}}
-        },
-        # Strategy 4: Default fallback
-        {
-            "name": "default",
-            "args": {}
-        }
-    ]
+            }
+        })
+
+    strategies.append({
+        "name": "default",
+        "args": {}
+    })
 
     return strategies
 
@@ -114,9 +108,9 @@ def _ydl_opts(strategy: dict) -> dict:
         "no_warnings": True,
         "nocheckcertificate": True,
         "cachedir": "/tmp/yt-dlp-cache",
-        "socket_timeout": 25,
-        "retries": 3,
-        "fragment_retries": 3,
+        "socket_timeout": 14,
+        "retries": 1,
+        "fragment_retries": 1,
         "extractor_args": strategy.get("args", {}),
     }
 
