@@ -26,6 +26,26 @@ log = logging.getLogger("mymusic")
 app = FastAPI(title="MyMusic Backend", version="4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# On startup, materialize YouTube cookies from the YT_COOKIES env var (if set)
+# into cookies.txt, so yt-dlp can bypass YouTube's "Sign in to confirm you're
+# not a bot" block on Render's datacenter IP. Set YT_COOKIES in the Render
+# dashboard to either the raw Netscape cookies.txt content or its base64.
+_YT_COOKIES_ENV = os.environ.get("YT_COOKIES", "").strip()
+if _YT_COOKIES_ENV:
+    try:
+        import base64 as _b64
+        _content = _YT_COOKIES_ENV
+        if "# Netscape" not in _content and "\t" not in _content:
+            try:
+                _content = _b64.b64decode(_YT_COOKIES_ENV).decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+        with open("cookies.txt", "w", newline="\n") as _f:
+            _f.write(_content)
+        log.info("Materialized YT_COOKIES env var into cookies.txt for yt-dlp")
+    except Exception as _e:
+        log.warning(f"Failed to materialize YT_COOKIES: {_e}")
+
 # ---------------------------------------------------------------------------
 # In-memory caches
 # ---------------------------------------------------------------------------
