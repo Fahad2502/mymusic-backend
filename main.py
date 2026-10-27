@@ -78,6 +78,10 @@ _SAAVN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
+    "Cookie": "L=english%2Chindi; geo=IN; gdpr_acceptance=true",
+    "X-Forwarded-For": "49.36.0.1",
+    "X-Real-IP": "49.36.0.1",
+    "CF-Connecting-IP": "49.36.0.1",
 }
 _DES_KEY = b"38346591"
 
@@ -135,10 +139,56 @@ def _format_thumbnail(img_url: str) -> str:
     return re.sub(r"-(150x150|50x50)\.", "-500x500.", img_url)
 
 
+def _score_song(item: dict, query: str) -> float:
+    """Rank songs so original, mega-famous tracks appear first."""
+    q = query.lower().strip()
+    q_words = set(re.findall(r"\w+", q))
+
+    raw_title = item.get("song") or item.get("title") or ""
+    title = html.unescape(raw_title).lower().strip()
+    title_words = set(re.findall(r"\w+", title))
+
+    raw_artist = item.get("primary_artists") or item.get("singers") or ""
+    artist = html.unescape(raw_artist).lower().strip()
+    artist_words = set(re.findall(r"\w+", artist))
+
+    try:
+        plays = int(item.get("play_count") or 0)
+    except Exception:
+        plays = 0
+
+    score = float(plays)
+
+    # Heavily penalize karaoke, instrumental, tribute, cover versions unless requested
+    is_cover = any(k in title for k in ["karaoke", "instrumental", "tribute", "originally perfomed", "cover", "backing track"])
+    asked_cover = any(k in q for k in ["karaoke", "instrumental", "cover"])
+    if is_cover and not asked_cover:
+        score -= 100_000_000_000
+
+    # Strong boost for exact title match
+    if title == q:
+        score += 5_000_000_000
+    elif title.startswith(q):
+        score += 2_000_000_000
+    elif q in title:
+        score += 1_000_000_000
+
+    # Strong boost when query matches title + artist
+    all_words = title_words | artist_words
+    if q_words and q_words.issubset(all_words):
+        score += 3_000_000_000
+    elif q_words:
+        overlap = len(q_words & all_words)
+        score += overlap * 200_000_000
+
+    return score
+
+
 def _saavn_search(query: str, limit: int = 8) -> list[dict]:
-    """Instant search returning song metadata and pre-caching audio stream URLs."""
+    """Instant search returning the most famous song first and pre-caching audio stream URLs."""
     try:
         t0 = time.time()
+        # Fetch up to 25 items to have a broad pool for popularity sorting
         params = {
             "__call": "search.getResults",
             "_format": "json",
@@ -146,7 +196,7 @@ def _saavn_search(query: str, limit: int = 8) -> list[dict]:
             "cc": "in",
             "includeMetaTags": "1",
             "q": query,
-            "n": max(limit, 8),
+            "n": max(limit * 3, 24),
             "p": 1,
         }
         r = httpx.get(_SAAVN_API_URL, params=params, headers=_SAAVN_HEADERS, timeout=6.0)
@@ -159,7 +209,12 @@ def _saavn_search(query: str, limit: int = 8) -> list[dict]:
         if not raw_results:
             return []
 
+        # Sort raw results by popularity score
+        raw_results.sort(key=lambda item: _score_song(item, query), reverse=True)
+
         results = []
+        seen_pairs = set()
+
         for s in raw_results:
             song_id = s.get("id")
             if not song_id:
@@ -170,6 +225,12 @@ def _saavn_search(query: str, limit: int = 8) -> list[dict]:
 
             raw_artist = s.get("primary_artists") or s.get("singers") or s.get("music") or "Artist"
             artist = html.unescape(raw_artist).strip()
+
+            # Deduplicate duplicates of same track
+            norm_key = (re.sub(r'\(.*?\)', '', title).strip().lower(), artist.lower().split(',')[0].strip())
+            if norm_key in seen_pairs:
+                continue
+            seen_pairs.add(norm_key)
 
             thumb = _format_thumbnail(s.get("image") or "")
             try:
