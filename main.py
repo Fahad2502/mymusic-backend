@@ -247,10 +247,15 @@ def _invidious_extract(video_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # ──────────────────────── METHOD 3: yt-dlp FALLBACK ───────────────────────
 # ---------------------------------------------------------------------------
+# yt-dlp client strategies, most-reliable first.
+# NOTE: We avoid forcing POT-needing clients (tv_embedded/android_vr) — YouTube
+# now requires PO-tokens for those on datacenter IPs. The "default" strategy
+# lets yt-dlp pick its PO-token-free clients automatically (per yt-dlp wiki),
+# which is the most reliable path on Render's free datacenter IP.
 _YDL_STRATEGIES = [
-    {"name": "tv_embedded", "args": {"youtube": {"player_client": ["tv_embedded"]}}},
-    {"name": "android_vr",  "args": {"youtube": {"player_client": ["android_vr"]}}},
-    {"name": "mweb",        "args": {"youtube": {"player_client": ["mweb"]}}},
+    {"name": "default", "args": {}},
+    {"name": "mweb",    "args": {"youtube": {"player_client": ["mweb"]}}},
+    {"name": "ios",     "args": {"youtube": {"player_client": ["ios"]}}},
 ]
 
 
@@ -335,16 +340,16 @@ def _extract(video_id: str) -> dict:
 
     song = None
 
-    # 2. InnerTube (fastest)
-    song = _innertube_extract(video_id)
+    # NOTE: Direct InnerTube player extraction was removed. YouTube now
+    # requires PO-tokens for those clients, so they always return
+    # ERROR/UNPLAYABLE (and waste ~1.2s). Going straight to yt-dlp with
+    # PO-token-free default clients is both faster and more reliable.
+    # 2. yt-dlp (PO-token-free default clients)
+    song = _ytdlp_extract(video_id)
 
-    # 3. Invidious
+    # 3. Invidious fallback (public API, sometimes works)
     if not song:
         song = _invidious_extract(video_id)
-
-    # 4. yt-dlp (slow fallback)
-    if not song:
-        song = _ytdlp_extract(video_id)
 
     if not song:
         raise RuntimeError(f"All extraction methods failed for {video_id}")
