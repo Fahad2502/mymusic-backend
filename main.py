@@ -247,15 +247,15 @@ def _invidious_extract(video_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # ──────────────────────── METHOD 3: yt-dlp FALLBACK ───────────────────────
 # ---------------------------------------------------------------------------
-# yt-dlp client strategies, most-reliable first.
-# NOTE: We avoid forcing POT-needing clients (tv_embedded/android_vr) — YouTube
-# now requires PO-tokens for those on datacenter IPs. The "default" strategy
-# lets yt-dlp pick its PO-token-free clients automatically (per yt-dlp wiki),
-# which is the most reliable path on Render's free datacenter IP.
+# yt-dlp client strategies, fastest/most-reliable first.
+# "default" uses yt-dlp's PO-token-free clients (fast, works for many videos).
+# "tv_embedded" needs a PO-token — served by the bgutil POT provider (start.sh),
+# which is what bypasses YouTube's "Sign in to confirm you're not a bot" block
+# on Render's datacenter IP for popular/Vevo music videos.
 _YDL_STRATEGIES = [
-    {"name": "default", "args": {}},
-    {"name": "mweb",    "args": {"youtube": {"player_client": ["mweb"]}}},
-    {"name": "ios",     "args": {"youtube": {"player_client": ["ios"]}}},
+    {"name": "default",     "args": {}},
+    {"name": "tv_embedded", "args": {"youtube": {"player_client": ["tv_embedded"]}}},
+    {"name": "mweb",        "args": {"youtube": {"player_client": ["mweb"]}}},
 ]
 
 

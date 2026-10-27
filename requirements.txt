@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
 https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
+bgutil-ytdlp-pot-provider
 httpx
