@@ -466,7 +466,7 @@ def _saavn_map_item(s: dict) -> dict | None:
 
     album = html.unescape(str(s.get("album") or more.get("album") or "")).strip()
     return {
-        "video_id": song_id,
+        "video_id": f"s:{song_id}",
         "title": title,
         "thumbnail": thumb,
         "duration": dur,
@@ -544,11 +544,16 @@ def _saavn_search(query: str, limit: int = 8) -> list[dict]:
         raw_results.sort(key=lambda item: _score_song(item, query), reverse=True)
 
         results = []
+        seen_ids = set()
         seen_pairs = set()
 
         def _add(mapped: dict | None):
             if not mapped:
                 return
+            vid = mapped["video_id"]
+            if vid in seen_ids:
+                return
+            seen_ids.add(vid)
             title = mapped["title"]
             artist = mapped["channel"]
             norm_key = (
@@ -823,6 +828,12 @@ def _ytdlp_extract(video_id: str) -> dict | None:
 # ────────────────────── UNIFIED EXTRACTION PIPELINE ─────────────────────────
 # ---------------------------------------------------------------------------
 def _extract(video_id: str) -> dict:
+    # Strip the "s:" prefix that search results use to namespace Saavn IDs
+    saavn_id = None
+    if video_id.startswith("s:"):
+        saavn_id = video_id[2:]
+        video_id = saavn_id
+
     # 1. In-memory Saavn cache (<1ms)
     cached = _SAAVN_MEDIA_CACHE.get(video_id)
     if cached and cached.get("audio_url"):
@@ -837,15 +848,15 @@ def _extract(video_id: str) -> dict:
     song = _saavn_extract_by_id(video_id)
 
     # 4. If not a Saavn ID, check if it's a YouTube ID and bridge via Saavn
-    if not song and len(video_id) == 11:
+    if not song and saavn_id is None and len(video_id) == 11:
         song = _resolve_youtube_id_via_saavn(video_id)
 
-    # 5. Invidious fallback
-    if not song:
+    # 5. Invidious fallback (YouTube IDs only)
+    if not song and saavn_id is None:
         song = _invidious_extract(video_id)
 
-    # 6. yt-dlp fallback (last resort)
-    if not song:
+    # 6. yt-dlp fallback (YouTube IDs only, last resort)
+    if not song and saavn_id is None:
         song = _ytdlp_extract(video_id)
 
     if not song:
