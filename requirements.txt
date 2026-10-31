@@ -3,5 +3,5 @@ uvicorn[standard]
 httpx
 pyDes
 cryptography
-https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
+yt-dlp
 bgutil-ytdlp-pot-provider
