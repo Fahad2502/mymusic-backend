@@ -280,27 +280,51 @@ def _is_junk(item: dict, query: str) -> bool:
 
 
 def _rank(item: dict, query: str) -> float:
-    t   = item.get("title","")
-    ch  = item.get("channel","")
+    t   = item.get("title", "")
+    ch  = item.get("channel", "")
     q   = query.strip()
+    plays = _plays(item.get("_plays", 0))
 
-    title_sim  = _similarity(q, t)
-    combo_sim  = _similarity(q, f"{t} {ch}")
-    relevance  = max(title_sim, combo_sim)
-    pop        = min(math.log10(_plays(item.get("_plays",0)) + 1), 10)
+    title_sim = _similarity(q, t)
+    combo_sim = _similarity(q, f"{t} {ch}")
+    relevance = max(title_sim, combo_sim)
+    pop       = min(math.log10(plays + 1), 10)
 
     score  = relevance * 10_000_000_000
     score += pop       *    900_000_000
 
-    if _has_famous(item):     score += 20_000_000_000
-    elif relevance >= 0.55:   score -= 18_000_000_000   # irrelevant unknown cover
-
     blob = f"{t} {ch}".lower()
-    if "official" in blob or "coke studio" in blob:  score += 5_000_000_000
-    if any(k in blob for k in ("whatsapp","shorts","tiktok","ringtone")): score -= 15_000_000_000
-    if _is_junk(item, q):     score -= 35_000_000_000
+
+    # Heavy boost for known famous artists
+    if _has_famous(item):
+        score += 25_000_000_000
+    else:
+        # Unknown artist with good title match — likely a cover/remake
+        # Penalise harder so originals always rank above covers
+        if relevance >= 0.5:
+            score -= 22_000_000_000
+
+    # Official / label channels
+    if any(k in blob for k in ("official", "coke studio", "t-series", "sony", "zee music",
+                                "saregama", "tips", "yrf", "vevo", "speed records")):
+        score += 6_000_000_000
+
+    # Junk content
+    if any(k in blob for k in ("whatsapp", "status", "shorts", "tiktok", "ringtone")):
+        score -= 15_000_000_000
+    if _is_junk(item, q):
+        score -= 40_000_000_000
+
     dur = item.get("duration") or 0
-    if dur and dur < 50:      score -= 12_000_000_000
+    if dur and dur < 50:
+        score -= 12_000_000_000
+
+    # If the query itself contains a famous artist name, boost matches that include it
+    q_lower = q.lower()
+    for voice in _FAMOUS_VOICES:
+        if voice in q_lower and voice in blob:
+            score += 15_000_000_000
+            break
 
     return score
 
@@ -478,54 +502,81 @@ def _titles_overlap(query: str, candidate: str) -> bool:
 
 
 def _bridge_yt_to_saavn(video_id: str) -> dict | None:
-    """Convert a YouTube video ID to a Saavn 320kbps stream."""
-    # Get title from oEmbed (never blocked by YouTube)
+    """Convert a YouTube video ID to a Saavn 320kbps stream.
+    Matches both title AND artist so covers are never returned instead of the original.
+    """
     try:
         r = httpx.get(
             f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
             timeout=5.0)
         if r.status_code != 200: return None
-        yt_title = r.json().get("title", "")
+        data = r.json()
+        yt_title  = data.get("title", "")
+        yt_author = data.get("author_name", "")  # channel name e.g. "T-Series", "Coke Studio"
     except Exception:
         return None
 
     if not yt_title: return None
     cleaned = _clean_title(yt_title)
-    log.info(f"Bridging {video_id} '{yt_title}' → '{cleaned}'")
+    log.info(f"Bridging {video_id} '{yt_title}' (author='{yt_author}') → '{cleaned}'")
 
-    # Build query variations — try from most specific to least
+    # Extract artist tokens from the YouTube title and channel name combined
+    # e.g. "Rahat Fateh Ali Khan", "Atif Aslam", "Ed Sheeran"
+    artist_blob = f"{yt_title} {yt_author}".lower()
+    # Also extract any artist mentioned after | separators in yt_title
+    pipe_artists = [p.strip() for p in yt_title.split("|") if p.strip()]
+
+    # Build search queries from most specific to least
     queries: list[str] = []
     if cleaned:
         queries.append(cleaned)
-    # Extract just core words (first 3) in case full title has extra context
     words = cleaned.split()
     if len(words) > 3:
-        queries.append(" ".join(words[:3]))
+        queries.append(" ".join(words[:4]))
     if len(words) > 2:
-        queries.append(" ".join(words[:2]))
-    # Also try original title's pipe parts
-    pipe_parts = [p.strip() for p in yt_title.split("|") if p.strip() and len(p.strip()) > 3]
-    for part in pipe_parts[:3]:
+        queries.append(" ".join(words[:3]))
+    # Add pipe segments as extra queries
+    for part in pipe_artists[:3]:
         part_clean = re.sub(r'\b(season|coke studio|ep\.?|vol\.?)\s*\d*\b', '', part, flags=re.I).strip()
-        if part_clean and part_clean not in queries:
+        if part_clean and _compact(part_clean) not in [_compact(q) for q in queries]:
             queries.append(part_clean)
+
+    def _artist_matches(saavn_artist: str) -> bool:
+        """Check if Saavn artist matches YouTube video's artist."""
+        sa = saavn_artist.lower()
+        # Check key name tokens against YouTube title+author blob
+        for tok in _tokens(sa):
+            if len(tok) > 3 and tok in _tokens(artist_blob):
+                return True
+        # Check YouTube artist tokens against Saavn artist
+        for tok in _tokens(artist_blob):
+            if len(tok) > 4 and tok in _tokens(sa):
+                return True
+        return False
 
     for q in queries:
         q = q.strip()
         if not q or len(q) < 3: continue
-        log.info(f"Bridge trying query '{q}'")
-        candidates = _saavn_autocomplete(q) or _saavn_full_search(q, 8)
-        for cand in candidates[:8]:
+        log.info(f"Bridge trying '{q}'")
+        candidates = _saavn_autocomplete(q) or _saavn_full_search(q, 10)
+        for cand in candidates[:10]:
             sid = cand.get("_sid", "")
             if not sid: continue
-            if _titles_overlap(q, cand["title"]) or _titles_overlap(cleaned, cand["title"]):
+            cand_title  = cand.get("title", "")
+            cand_artist = cand.get("channel", "")
+
+            title_ok  = _titles_overlap(cleaned or q, cand_title)
+            artist_ok = _artist_matches(cand_artist)
+
+            # Must match BOTH title and artist — prevents covers
+            if title_ok and artist_ok:
                 song = _saavn_extract_by_id(sid)
                 if song:
                     _SAAVN_MEDIA_CACHE[video_id] = song
-                    log.info(f"Bridge OK: {video_id} → saavn '{song['title']}'")
+                    log.info(f"Bridge OK: {video_id} → '{song['title']}' by '{cand_artist}'")
                     return song
 
-    log.info(f"Bridge: no Saavn match for {video_id} ('{yt_title}') — falling to yt-dlp")
+    log.info(f"Bridge: no Saavn match (title+artist) for {video_id} '{yt_title}' — falling to yt-dlp")
     return None
 
 
