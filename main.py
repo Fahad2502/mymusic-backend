@@ -458,13 +458,14 @@ def _clean_title(title: str) -> str:
     return " ".join(t.split()).strip()
 
 
-def _titles_overlap(a: str, b: str) -> bool:
-    aw = set(w for w in _tokens(a) if len(w) > 2)
-    bw = set(w for w in _tokens(b) if len(w) > 2)
-    if not aw or not bw: return False
-    # Check overlap in both directions — short Saavn titles match long YT titles
-    overlap = len(aw & bw)
-    return (overlap / len(bw)) >= 0.35 or (overlap / len(aw)) >= 0.5
+def _titles_overlap(query: str, candidate: str) -> bool:
+    """Check if candidate title is the same song as query. Strict — avoids false matches."""
+    qw = set(w for w in _tokens(query) if len(w) > 2)
+    cw = set(w for w in _tokens(candidate) if len(w) > 2)
+    if not qw or not cw: return False
+    overlap = len(qw & cw)
+    # Need at least 50% of query words to appear in candidate
+    return (overlap / len(qw)) >= 0.50
 
 
 def _bridge_yt_to_saavn(video_id: str) -> dict | None:
@@ -518,14 +519,21 @@ def _cookie_path() -> str | None:
 
 
 def _ytdlp_extract(video_id: str) -> dict | None:
-    """yt-dlp with bgutil PO-token provider — bypasses Render datacenter IP block."""
+    """yt-dlp with bgutil PO-token provider plugin.
+    bgutil-ytdlp-pot-provider registers itself automatically as a yt-dlp plugin
+    when installed. It bypasses YouTube's bot-check on datacenter IPs by
+    generating PO-tokens via a local bgutil server (started in start.sh).
+    """
     if yt_dlp is None: return None
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # Try strategies in order: tv_embedded with POT (best for datacenter IPs), then android, then mweb
     strategies = [
-        {"name": "tv_embedded+pot", "extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}, "timeout": 20},
-        {"name": "android",         "extractor_args": {"youtube": {"player_client": ["android","mweb"]}}, "timeout": 15},
+        # tv_embedded client uses PO-token from bgutil server — bypasses Render IP block
+        {"name": "tv_embedded", "client": ["tv_embedded"], "timeout": 25},
+        # android client — sometimes works without PO-token
+        {"name": "android",    "client": ["android"], "timeout": 15},
+        # mweb — another fallback
+        {"name": "mweb",       "client": ["mweb"], "timeout": 15},
     ]
 
     for strat in strategies:
@@ -534,44 +542,41 @@ def _ytdlp_extract(video_id: str) -> dict | None:
             "noplaylist": True, "quiet": True, "no_warnings": True,
             "nocheckcertificate": True, "cachedir": False,
             "socket_timeout": strat["timeout"], "retries": 1,
-            "extractor_args": strat["extractor_args"],
+            "extractor_args": {"youtube": {"player_client": strat["client"]}},
             "http_headers": {"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"},
         }
-        # Add bgutil PO-token provider if available (bypasses datacenter IP bot-check)
-        try:
-            from bgutil_ytdlp_pot_provider.provider import BgUtilPotProvider
-            opts.setdefault("compat_opts", set())
-            # bgutil provider hooks in via yt-dlp plugin system automatically when installed
-        except ImportError:
-            pass
         cp = _cookie_path()
         if cp: opts["cookiefile"] = cp
         try:
-            log.info(f"yt-dlp {strat['name']} for {video_id}")
+            log.info(f"yt-dlp [{strat['name']}] for {video_id}")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             audio = info.get("url")
             if not audio:
                 fmts = info.get("formats") or []
-                ao = [f for f in fmts if f.get("url") and f.get("vcodec") in (None,"none","") and f.get("acodec") not in (None,"none","")]
+                ao = [f for f in fmts if f.get("url") and
+                      f.get("vcodec") in (None,"none","") and
+                      f.get("acodec") not in (None,"none","")]
                 af = [f for f in fmts if f.get("url")]
                 best = (ao or af or [None])[0]
                 if best: audio = best["url"]
             if not audio:
-                log.warning(f"yt-dlp {strat['name']} no audio URL for {video_id}")
+                log.warning(f"yt-dlp [{strat['name']}] no URL for {video_id}")
                 continue
-            log.info(f"yt-dlp {strat['name']} OK for {video_id}")
+            log.info(f"yt-dlp [{strat['name']}] OK for {video_id}")
             return {
                 "audio_url": audio,
-                "title": info.get("title",""),
+                "title": info.get("title", ""),
                 "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                 "duration": info.get("duration"),
                 "http_headers": info.get("http_headers") or {},
                 "direct": False,
             }
         except Exception as e:
-            log.warning(f"yt-dlp {strat['name']} failed {video_id}: {e}")
+            log.warning(f"yt-dlp [{strat['name']}] failed {video_id}: {e}")
             continue
+
+    log.error(f"yt-dlp all strategies failed for {video_id}")
     return None
 
 
@@ -666,15 +671,38 @@ def debug():
     if yt_dlp:
         try: ver = yt_dlp.version.__version__
         except Exception: ver = "unknown"
+    # Check if bgutil server is running
+    bgutil_ok = False
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://127.0.0.1:4416/", timeout=1)
+        bgutil_ok = True
+    except Exception:
+        pass
     return {
         "version": "7.0", "engine": "saavn-first",
         "yt_dlp_version": ver,
+        "bgutil_running": bgutil_ok,
         "saavn_cache": len(_SAAVN_MEDIA_CACHE),
         "search_cache": len(_SEARCH_CACHE),
         "audio_cache": len(_AUDIO_CACHE),
         "stream_cache": len(STREAM_CACHE),
         "git_commit": os.environ.get("RENDER_GIT_COMMIT",""),
     }
+
+@app.get("/debug/yt")
+def debug_yt(v: str = "oyLVu753XJw"):
+    """Test YouTube extraction for a video ID — use ?v=VIDEO_ID."""
+    t0 = time.time()
+    try:
+        song = _ytdlp_extract(v)
+        elapsed = round(time.time()-t0, 2)
+        if song:
+            return {"ok": True, "elapsed_s": elapsed, "title": song.get("title"),
+                    "url_prefix": song.get("audio_url","")[:60]}
+        return {"ok": False, "elapsed_s": elapsed, "error": "no audio URL extracted"}
+    except Exception as e:
+        return {"ok": False, "elapsed_s": round(time.time()-t0,2), "error": str(e)[:200]}
 
 @app.get("/search_results")
 def search_results(query: str, limit: int = 20):
