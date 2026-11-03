@@ -447,14 +447,23 @@ def _search(query: str, limit: int = 20) -> list[dict]:
 def _clean_title(title: str) -> str:
     """Strip YouTube video noise to get a clean song title for Saavn search."""
     t = title
-    # Strip channel-name prefixes like "Coke Studio Season 9| " or "T-Series: "
-    t = re.sub(r'^[^|:]+[|:]\s*', '', t)
+    # If title has pipe separators (e.g. "Coke Studio Season 9| Afreen Afreen| Artist"),
+    # extract only the actual song name segment (usually the shortest meaningful segment)
+    parts = [p.strip() for p in t.split("|") if p.strip()]
+    if len(parts) >= 2:
+        # Pick the shortest segment that isn't a channel/season name
+        # Channel/season names contain digits (season 8, 9) or known keywords
+        song_parts = [p for p in parts if not re.search(r'\bseason\b|\bep\.?\s*\d|\bvol\.?\s*\d', p, re.I)]
+        if song_parts:
+            t = song_parts[0]  # first clean segment = song title
+        else:
+            t = parts[0]
     # Strip bracketed/parenthesised noise
-    t = re.sub(r'\(.*?(official|video|audio|lyrics|4k|hd|remaster|visualizer|feat\.?|ft\.?).*?\)', '', t, flags=re.I)
-    t = re.sub(r'\[.*?(official|video|audio|lyrics|4k|hd|remaster).*?\]', '', t, flags=re.I)
-    t = re.sub(r'official\s+(music\s+)?video|lyric\s+video|full\s+song|full\s+video|8k\s+song', '', t, flags=re.I)
-    # Strip season/episode info: "Season 9", "S09", "Ep 3"
-    t = re.sub(r'\bseason\s*\d+\b|\bs\d+\b|\bep\.?\s*\d+\b', '', t, flags=re.I)
+    t = re.sub(r'\s*\(.*?(official|video|audio|lyrics|4k|hd|remaster|visualizer|feat\.?|ft\.?).*?\)', '', t, flags=re.I)
+    t = re.sub(r'\s*\[.*?(official|video|audio|lyrics|4k|hd|remaster).*?\]', '', t, flags=re.I)
+    t = re.sub(r'\s*(official\s+(music\s+)?video|lyric\s+video|full\s+song|full\s+video|8k\s+song)', '', t, flags=re.I)
+    # Strip season/episode markers
+    t = re.sub(r'\bseason\s*\d+\b|\bep\.?\s*\d+\b', '', t, flags=re.I)
     return " ".join(t.split()).strip()
 
 
@@ -484,18 +493,27 @@ def _bridge_yt_to_saavn(video_id: str) -> dict | None:
     cleaned = _clean_title(yt_title)
     log.info(f"Bridging {video_id} '{yt_title}' → '{cleaned}'")
 
-    # Build multiple query variations to try
-    queries = [cleaned]
-    # If title has multiple words, also try just the first 3 words (core song name)
+    # Build query variations — try from most specific to least
+    queries: list[str] = []
+    if cleaned:
+        queries.append(cleaned)
+    # Extract just core words (first 3) in case full title has extra context
     words = cleaned.split()
     if len(words) > 3:
         queries.append(" ".join(words[:3]))
-    # Also try with artists stripped (everything before a dash or pipe)
-    if "|" in cleaned:
-        queries.append(cleaned.split("|")[-1].strip())
+    if len(words) > 2:
+        queries.append(" ".join(words[:2]))
+    # Also try original title's pipe parts
+    pipe_parts = [p.strip() for p in yt_title.split("|") if p.strip() and len(p.strip()) > 3]
+    for part in pipe_parts[:3]:
+        part_clean = re.sub(r'\b(season|coke studio|ep\.?|vol\.?)\s*\d*\b', '', part, flags=re.I).strip()
+        if part_clean and part_clean not in queries:
+            queries.append(part_clean)
 
     for q in queries:
-        if not q: continue
+        q = q.strip()
+        if not q or len(q) < 3: continue
+        log.info(f"Bridge trying query '{q}'")
         candidates = _saavn_autocomplete(q) or _saavn_full_search(q, 8)
         for cand in candidates[:8]:
             sid = cand.get("_sid", "")
@@ -507,7 +525,7 @@ def _bridge_yt_to_saavn(video_id: str) -> dict | None:
                     log.info(f"Bridge OK: {video_id} → saavn '{song['title']}'")
                     return song
 
-    log.info(f"Bridge found no Saavn match for {video_id} ('{yt_title}') — falling through to yt-dlp")
+    log.info(f"Bridge: no Saavn match for {video_id} ('{yt_title}') — falling to yt-dlp")
     return None
 
 
@@ -519,34 +537,41 @@ def _cookie_path() -> str | None:
 
 
 def _ytdlp_extract(video_id: str) -> dict | None:
-    """yt-dlp with bgutil PO-token provider plugin.
-    bgutil-ytdlp-pot-provider registers itself automatically as a yt-dlp plugin
-    when installed. It bypasses YouTube's bot-check on datacenter IPs by
-    generating PO-tokens via a local bgutil server (started in start.sh).
+    """yt-dlp fallback for YouTube IDs not on Saavn.
+    Only attempts if cookies are present (no cookies = Render blocks = 45s hang).
+    Uses android_vr client as last resort (no sign-in needed, but video+audio only).
     """
     if yt_dlp is None: return None
     url = f"https://www.youtube.com/watch?v={video_id}"
+    cp = _cookie_path()
+    has_cookies = bool(cp)
 
-    strategies = [
-        # tv_embedded client uses PO-token from bgutil server — bypasses Render IP block
-        {"name": "tv_embedded", "client": ["tv_embedded"], "timeout": 25},
-        # android client — sometimes works without PO-token
-        {"name": "android",    "client": ["android"], "timeout": 15},
-        # mweb — another fallback
-        {"name": "mweb",       "client": ["mweb"], "timeout": 15},
-    ]
+    # Without cookies, only try android_vr (format 18 - combined video+audio, no sign-in needed)
+    # It's not bot-blocked and gives a usable URL for audio extraction by the Android player
+    strategies = []
+    if has_cookies:
+        strategies += [
+            {"name": "tv_embedded", "client": ["tv_embedded"],     "fmt": "bestaudio[ext=m4a]/bestaudio/best", "timeout": 25},
+            {"name": "android",     "client": ["android"],         "fmt": "bestaudio[ext=m4a]/bestaudio/best", "timeout": 15},
+        ]
+    # android_vr works without sign-in on datacenter IPs — combined stream (video+audio)
+    # ExoPlayer on Android can play audio from a combined mp4 stream just fine
+    strategies.append(
+        {"name": "android_vr", "client": ["android_vr"], "fmt": "18/best", "timeout": 20}
+    )
+
+    opts_base = {
+        "noplaylist": True, "quiet": True, "no_warnings": True,
+        "nocheckcertificate": True, "cachedir": False, "retries": 0,
+        "http_headers": {"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"},
+    }
+    if cp: opts_base["cookiefile"] = cp
 
     for strat in strategies:
-        opts = {
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "noplaylist": True, "quiet": True, "no_warnings": True,
-            "nocheckcertificate": True, "cachedir": False,
-            "socket_timeout": strat["timeout"], "retries": 1,
-            "extractor_args": {"youtube": {"player_client": strat["client"]}},
-            "http_headers": {"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"},
-        }
-        cp = _cookie_path()
-        if cp: opts["cookiefile"] = cp
+        opts = {**opts_base,
+                "format": strat["fmt"],
+                "socket_timeout": strat["timeout"],
+                "extractor_args": {"youtube": {"player_client": strat["client"]}}}
         try:
             log.info(f"yt-dlp [{strat['name']}] for {video_id}")
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -554,9 +579,7 @@ def _ytdlp_extract(video_id: str) -> dict | None:
             audio = info.get("url")
             if not audio:
                 fmts = info.get("formats") or []
-                ao = [f for f in fmts if f.get("url") and
-                      f.get("vcodec") in (None,"none","") and
-                      f.get("acodec") not in (None,"none","")]
+                ao = [f for f in fmts if f.get("url") and f.get("vcodec") in (None,"none","") and f.get("acodec") not in (None,"none","")]
                 af = [f for f in fmts if f.get("url")]
                 best = (ao or af or [None])[0]
                 if best: audio = best["url"]
