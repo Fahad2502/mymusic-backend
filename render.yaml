@@ -3,7 +3,8 @@ services:
     name: mymusic-backend
     runtime: python
     plan: free
-    buildCommand: pip install --no-cache-dir -r requirements.txt
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
     healthCheckPath: /health
     autoDeploy: true

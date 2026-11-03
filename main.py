@@ -493,43 +493,61 @@ def _cookie_path() -> str | None:
 
 
 def _ytdlp_extract(video_id: str) -> dict | None:
-    """yt-dlp last resort — strict 8s socket timeout, single attempt."""
+    """yt-dlp with bgutil PO-token provider — bypasses Render datacenter IP block."""
     if yt_dlp is None: return None
     url = f"https://www.youtube.com/watch?v={video_id}"
-    opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
-        "noplaylist": True, "quiet": True, "no_warnings": True,
-        "nocheckcertificate": True, "cachedir": False,
-        "socket_timeout": 8, "retries": 0,
-        "extractor_args": {"youtube": {"player_client": ["android","mweb","ios"]}},
-        "http_headers": {"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"},
-    }
-    cp = _cookie_path()
-    if cp: opts["cookiefile"] = cp
-    try:
-        log.info(f"yt-dlp attempt for {video_id}")
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        audio = info.get("url")
-        if not audio:
-            fmts = info.get("formats") or []
-            ao = [f for f in fmts if f.get("url") and f.get("vcodec") in (None,"none","") and f.get("acodec") not in (None,"none","")]
-            af = [f for f in fmts if f.get("url")]
-            best = (ao or af or [None])[0]
-            if best: audio = best["url"]
-        if not audio: return None
-        log.info(f"yt-dlp OK for {video_id}")
-        return {
-            "audio_url": audio,
-            "title": info.get("title",""),
-            "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-            "duration": info.get("duration"),
-            "http_headers": info.get("http_headers") or {},
-            "direct": False,
+
+    # Try strategies in order: tv_embedded with POT (best for datacenter IPs), then android, then mweb
+    strategies = [
+        {"name": "tv_embedded+pot", "extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}, "timeout": 20},
+        {"name": "android",         "extractor_args": {"youtube": {"player_client": ["android","mweb"]}}, "timeout": 15},
+    ]
+
+    for strat in strategies:
+        opts = {
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "noplaylist": True, "quiet": True, "no_warnings": True,
+            "nocheckcertificate": True, "cachedir": False,
+            "socket_timeout": strat["timeout"], "retries": 1,
+            "extractor_args": strat["extractor_args"],
+            "http_headers": {"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"},
         }
-    except Exception as e:
-        log.warning(f"yt-dlp failed {video_id}: {e}")
-        return None
+        # Add bgutil PO-token provider if available (bypasses datacenter IP bot-check)
+        try:
+            from bgutil_ytdlp_pot_provider.provider import BgUtilPotProvider
+            opts.setdefault("compat_opts", set())
+            # bgutil provider hooks in via yt-dlp plugin system automatically when installed
+        except ImportError:
+            pass
+        cp = _cookie_path()
+        if cp: opts["cookiefile"] = cp
+        try:
+            log.info(f"yt-dlp {strat['name']} for {video_id}")
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            audio = info.get("url")
+            if not audio:
+                fmts = info.get("formats") or []
+                ao = [f for f in fmts if f.get("url") and f.get("vcodec") in (None,"none","") and f.get("acodec") not in (None,"none","")]
+                af = [f for f in fmts if f.get("url")]
+                best = (ao or af or [None])[0]
+                if best: audio = best["url"]
+            if not audio:
+                log.warning(f"yt-dlp {strat['name']} no audio URL for {video_id}")
+                continue
+            log.info(f"yt-dlp {strat['name']} OK for {video_id}")
+            return {
+                "audio_url": audio,
+                "title": info.get("title",""),
+                "thumbnail": info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                "duration": info.get("duration"),
+                "http_headers": info.get("http_headers") or {},
+                "direct": False,
+            }
+        except Exception as e:
+            log.warning(f"yt-dlp {strat['name']} failed {video_id}: {e}")
+            continue
+    return None
 
 
 def _extract(video_id: str) -> dict:
