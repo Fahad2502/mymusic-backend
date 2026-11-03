@@ -367,16 +367,24 @@ _PIN_QUERIES: dict[str, list[str]] = {
 }
 
 def _get_pins(query: str) -> list[dict]:
-    """Return pinned songs that match this query."""
+    """Return pinned songs that match this query. Strict — only fires on close matches."""
     cq = _compact(query)
-    qlow = query.lower().strip()
+    if len(cq) < 4:
+        return []   # too short to pin anything reliably
     pins = []
     for pin in _PINS:
         vid = pin["video_id"]
-        queries = _PIN_QUERIES.get(vid, [])
-        for pq in queries:
-            if _compact(pq) in cq or cq in _compact(pq) or \
-               _similarity(query, pq) >= 0.75:
+        pq_list = _PIN_QUERIES.get(vid, [])
+        for pq in pq_list:
+            cpq = _compact(pq)
+            if not cpq:
+                continue
+            # The pin query must substantially match the user query
+            # Use similarity >= 0.80 OR exact containment only when both strings are long enough
+            sim = _similarity(query, pq)
+            exact_fwd = cpq in cq and len(cpq) >= 6
+            exact_rev = cq in cpq and len(cq) >= 6
+            if sim >= 0.80 or exact_fwd or exact_rev:
                 pins.append(pin)
                 break
     return pins
