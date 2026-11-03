@@ -442,9 +442,19 @@ def _search(query: str, limit: int = 20) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════
 # EXTRACTION PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════
+
+
 def _clean_title(title: str) -> str:
-    t = re.sub(r'\(.*?(official|video|audio|lyrics|4k|hd|remaster).*?\)', '', title, flags=re.I)
-    t = re.sub(r'official\s+(music\s+)?video|lyric\s+video|full\s+song|full\s+video', '', t, flags=re.I)
+    """Strip YouTube video noise to get a clean song title for Saavn search."""
+    t = title
+    # Strip channel-name prefixes like "Coke Studio Season 9| " or "T-Series: "
+    t = re.sub(r'^[^|:]+[|:]\s*', '', t)
+    # Strip bracketed/parenthesised noise
+    t = re.sub(r'\(.*?(official|video|audio|lyrics|4k|hd|remaster|visualizer|feat\.?|ft\.?).*?\)', '', t, flags=re.I)
+    t = re.sub(r'\[.*?(official|video|audio|lyrics|4k|hd|remaster).*?\]', '', t, flags=re.I)
+    t = re.sub(r'official\s+(music\s+)?video|lyric\s+video|full\s+song|full\s+video|8k\s+song', '', t, flags=re.I)
+    # Strip season/episode info: "Season 9", "S09", "Ep 3"
+    t = re.sub(r'\bseason\s*\d+\b|\bs\d+\b|\bep\.?\s*\d+\b', '', t, flags=re.I)
     return " ".join(t.split()).strip()
 
 
@@ -452,36 +462,51 @@ def _titles_overlap(a: str, b: str) -> bool:
     aw = set(w for w in _tokens(a) if len(w) > 2)
     bw = set(w for w in _tokens(b) if len(w) > 2)
     if not aw or not bw: return False
-    return (len(aw & bw) / len(bw)) >= 0.4
+    # Check overlap in both directions — short Saavn titles match long YT titles
+    overlap = len(aw & bw)
+    return (overlap / len(bw)) >= 0.35 or (overlap / len(aw)) >= 0.5
 
 
 def _bridge_yt_to_saavn(video_id: str) -> dict | None:
     """Convert a YouTube video ID to a Saavn 320kbps stream."""
-    # Get title from oEmbed (never blocked)
+    # Get title from oEmbed (never blocked by YouTube)
     try:
         r = httpx.get(
             f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
             timeout=5.0)
         if r.status_code != 200: return None
-        yt_title = r.json().get("title","")
+        yt_title = r.json().get("title", "")
     except Exception:
         return None
 
     if not yt_title: return None
     cleaned = _clean_title(yt_title)
-    log.info(f"Bridging {video_id} '{yt_title}' → saavn '{cleaned}'")
+    log.info(f"Bridging {video_id} '{yt_title}' → '{cleaned}'")
 
-    # Search Saavn for it
-    candidates = _saavn_autocomplete(cleaned) or _saavn_full_search(cleaned, 5)
-    for cand in candidates[:5]:
-        sid = cand.get("_sid","")
-        if not sid: continue
-        if _titles_overlap(cleaned, cand["title"]):
-            song = _saavn_extract_by_id(sid)
-            if song:
-                _SAAVN_MEDIA_CACHE[video_id] = song   # cache under YT ID too
-                log.info(f"Bridge OK: {video_id} → saavn '{song['title']}'")
-                return song
+    # Build multiple query variations to try
+    queries = [cleaned]
+    # If title has multiple words, also try just the first 3 words (core song name)
+    words = cleaned.split()
+    if len(words) > 3:
+        queries.append(" ".join(words[:3]))
+    # Also try with artists stripped (everything before a dash or pipe)
+    if "|" in cleaned:
+        queries.append(cleaned.split("|")[-1].strip())
+
+    for q in queries:
+        if not q: continue
+        candidates = _saavn_autocomplete(q) or _saavn_full_search(q, 8)
+        for cand in candidates[:8]:
+            sid = cand.get("_sid", "")
+            if not sid: continue
+            if _titles_overlap(q, cand["title"]) or _titles_overlap(cleaned, cand["title"]):
+                song = _saavn_extract_by_id(sid)
+                if song:
+                    _SAAVN_MEDIA_CACHE[video_id] = song
+                    log.info(f"Bridge OK: {video_id} → saavn '{song['title']}'")
+                    return song
+
+    log.info(f"Bridge found no Saavn match for {video_id} ('{yt_title}') — falling through to yt-dlp")
     return None
 
 
